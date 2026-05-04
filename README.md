@@ -45,12 +45,4 @@ source .venv/bin/activate
 
 Click any alert row to see DNS query details + all 28 features.
 
-## Performance
 
-| Metric | Score |
-|--------|-------|
-| Accuracy | 99.99% |
-| Precision | 100.0% |
-| Recall | 99.99% |
-| F1 | 99.99% |
-| ROC-AUC | 1.0000 |
