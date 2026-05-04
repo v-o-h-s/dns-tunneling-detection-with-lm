@@ -2,6 +2,8 @@
 
 Detect DNS tunneling attacks using an XGBoost model trained on the BCCC-CIRA-CIC-DoHBrw-2020 dataset. 28 statistical flow features → 99.99% F1.
 
+<img width="1919" height="1035" alt="Image" src="https://github.com/user-attachments/assets/184a1eb0-6e05-4089-b5a2-9d635e87907f" />
+
 ## Setup
 
 ```bash
