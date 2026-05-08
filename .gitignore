@@ -50,8 +50,9 @@ datasets/*.parquet
 datasets/*.pkl
 extract.pid
 
-# Keep deployable model artifacts and small metadata in Git.
-!artifacts/
+# Generated samples and artifacts (rebuilt locally)
+samples/
+artifacts/
 
 # Misc
 *.log

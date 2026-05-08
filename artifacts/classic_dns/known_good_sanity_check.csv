@@ -1,5 +1,0 @@
-query_name,malicious_probability,tui_label_at_70pct
-ping.archlinux.org,0.5142553391482881,Benign
-mirror.archlinux.org,0.5178420629254034,Benign
-geo.mirror.pkgbuild.com,0.5378015647764144,Benign
-pool.ntp.org,0.517112482005431,Benign
