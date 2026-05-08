@@ -1,222 +1,830 @@
-\documentclass[11pt]{article}
+\documentclass[12pt,a4paper]{article}
 
 \usepackage[utf8]{inputenc}
 \usepackage[T1]{fontenc}
-\usepackage[margin=1in]{geometry}
-\usepackage{booktabs}
-\usepackage{array}
-\usepackage{xcolor}
+\usepackage{amsmath,amssymb}
+\usepackage{graphicx}
 \usepackage{hyperref}
-\usepackage{enumitem}
+\usepackage{booktabs}
 \usepackage{listings}
+\usepackage{xcolor}
+\usepackage{geometry}
+\usepackage{titlesec}
+\usepackage{fancyhdr}
+\usepackage{float}
+
+\geometry{margin=2.5cm}
 
 \hypersetup{
-  colorlinks=true,
-  linkcolor=blue,
-  urlcolor=blue,
-  citecolor=blue
+    colorlinks=true,
+    linkcolor=blue,
+    urlcolor=cyan,
+    citecolor=blue
 }
 
-\lstdefinestyle{shell}{
-  basicstyle=\ttfamily\small,
-  breaklines=true,
-  frame=single,
-  columns=fullflexible
+\definecolor{codebg}{RGB}{240,240,240}
+\lstset{
+    backgroundcolor=\color{codebg},
+    basicstyle=\ttfamily\footnotesize,
+    breaklines=true,
+    frame=single,
+    aboveskip=8pt,
+    belowskip=8pt
 }
 
-\title{\textbf{Transport-Aware DNS Tunneling Detection}\\
-\large Classic DNS UDP/TCP and DNS-over-HTTPS Monitoring}
-\author{CNS Project}
+\titleformat{\section}{\Large\bfseries}{\thesection}{1em}{}
+\titleformat{\subsection}{\large\bfseries}{\thesubsection}{1em}{}
+
+\title{\textbf{Transport-Aware DNS Tunneling Detection}\\[4pt]
+       \large Classic DNS UDP/TCP and DNS-over-HTTPS Monitoring with a Terminal UI}
+\author{CNS Project --- End-to-End Workflow Report}
 \date{\today}
 
 \begin{document}
 \maketitle
 
 \begin{abstract}
-This project implements a transport-aware DNS tunneling detector with a terminal user interface for live and replay-based demonstrations. The system monitors classic DNS over UDP/53 and TCP/53, plus DNS-over-HTTPS traffic to known DoH resolvers on TCP/443. Packets are aggregated into short flows, converted into model features, routed to the correct detector, and displayed with a malicious probability, alert threshold, transport label, and high-signal feature summary. The final workflow is designed for a reliable class demonstration: live capture is available when permissions allow it, while replay mode uses a curated local PCAP that exercises UDP53, TCP53, and DoH paths through the same detection pipeline.
+\noindent
+DNS tunneling is a covert communication technique that encodes arbitrary data within DNS queries and responses, bypassing firewalls and network policies because DNS traffic is almost never blocked. This project implements a transport-aware DNS tunneling detector that monitors three distinct transport channels---classic DNS over UDP/53, classic DNS over TCP/53, and DNS-over-HTTPS (DoH) to known resolvers on TCP/443. The system extracts transport-specific features from short flow windows, routes each flow to the appropriate trained model, and displays results in a SOC-style terminal user interface with malicious probability, confidence scores, alert severity, and high-signal feature breakdowns.
 \end{abstract}
 
-\section{Project Goal}
+% =============================================================================
+\section{Introduction}
 
-DNS tunneling hides command-and-control traffic or data exfiltration inside DNS requests and responses. Classic tunnels often encode payloads into long subdomain labels, TXT records, NULL records, repeated query bursts, or unusual TCP DNS payloads. DoH tunnels are harder to inspect because DNS content is encrypted inside HTTPS, so detection relies on flow statistics such as packet sizes, timing, and request/response asymmetry.
+\subsection{What is DNS Tunneling?}
 
-The goal of this project is to detect these behaviors in a way that can be demonstrated clearly:
+DNS tunneling exploits the Domain Name System to establish a covert communication channel between a compromised client and an attacker-controlled server. The DNS protocol was designed for name resolution---mapping human-readable domain names to IP addresses---not for arbitrary data transfer. However, because DNS traffic is almost universally permitted through firewalls (port 53 is typically open in both directions), it presents an attractive vector for data exfiltration and command-and-control (C2).
 
-\begin{itemize}[leftmargin=*]
-  \item support classic DNS over UDP/53 and TCP/53;
-  \item support conservative DoH monitoring for known resolver IPs;
-  \item use real trained artifacts instead of simulated predictions;
-  \item provide a replay fallback so the demo works without root permissions;
-  \item expose confidence, model status, and high-signal features in the UI.
+\paragraph{How it works.}
+The attacker deploys a malicious authoritative name server for a domain they control (e.g., \texttt{tunnel.attacker.test}). The compromised client encodes payload data into DNS query subdomains and sends them to the attacker's server:
+
+\begin{lstlisting}
+a1b2c3d4e5f6.upload-001.tunnel.attacker.test  A?
+dGhpcy1pcy1leGZpbC1kYXRh.session-042.tunnel.attacker.test  TXT?
+\end{lstlisting}
+
+The resolver forwards these queries through the DNS hierarchy to the attacker's authoritative server, which decodes the subdomain, processes the command or stores the exfiltrated data, and responds with DNS resource records containing encoded instructions or acknowledgments. To the network administrator, this traffic appears as legitimate DNS lookups to an obscure domain.
+
+\paragraph{Encoding strategies.}
+Attackers use several encoding techniques:
+\begin{itemize}
+    \item \textbf{Hex encoding} --- payloads as hexadecimal strings (most common, highest entropy)
+    \item \textbf{Base32/Base64} --- payloads in case-insensitive DNS-safe alphabets
+    \item \textbf{Raw binary} --- octets mapped to DNS label characters
+    \item \textbf{TXT/Null records} --- data in resource record bodies rather than query names
 \end{itemize}
 
+\paragraph{Real-world tools.}
+Several mature DNS tunneling tools exist: \texttt{iodine} (IP-over-DNS uses NULL, TXT, CNAME, MX records), \texttt{dnscat2} (C2 framework), \texttt{dns2tcp} (TCP-over-DNS relay), and \texttt{DNSpionage/DNSpooq} (nation-state tools). Each produces distinctive traffic patterns that our feature engineering targets.
+
+\subsection{Why Classic Detection Fails}
+
+Traditional DNS monitoring approaches---blacklists, domain reputation, or simple query-length thresholds---are insufficient:
+\begin{itemize}
+    \item Attackers rotate domains faster than blocklists update.
+    \item Legitimate CDN and telemetry domains produce long queries with high entropy.
+    \item DNS-over-HTTPS encrypts query names entirely, making payload inspection impossible.
+\end{itemize}
+
+Our approach instead learns statistical and behavioral patterns from network-layer features, making it protocol-agnostic within each transport type and resistant to payload obfuscation.
+
+% =============================================================================
+\section{Transport Protocols and Tunneling Vectors}
+
+DNS traffic travels over three transport channels, each with distinct characteristics and attack surfaces. The detector must handle all three because modern networks use them simultaneously.
+
+\subsection{Classic DNS over UDP/53}
+
+UDP DNS is the workhorse of the Internet. Queries and responses fit within single datagrams (typically 512 bytes, extended to 4096 with EDNS0). Key characteristics:
+
+\begin{itemize}
+    \item \textbf{Connectionless} --- no handshake, no state, low overhead
+    \item \textbf{Single request-response} --- one query, one answer per datagram
+    \item \textbf{Retransmission} --- clients resend after timeout; tunnels abuse this for reliability
+    \item \textbf{Fragile} --- truncated responses (TC flag) force fallback to TCP
+\end{itemize}
+
+\paragraph{Tunneling over UDP.}
+Malicious UDP DNS exhibits distinctive patterns:
+\begin{itemize}
+    \item Extremely long subdomain labels (60--255 characters vs.\ typical 5--15)
+    \item High character entropy and hex digit concentration
+    \item Many unique subdomains under one domain (no caching)
+    \item TXT and NULL record types (rare in benign traffic)
+    \item High query rates with small inter-arrival gaps
+    \item Repeated identical queries (retransmission abuse)
+\end{itemize}
+
+\subsection{Classic DNS over TCP/53}
+
+TCP DNS is used for zone transfers (AXFR), large responses exceeding 512 bytes, and as a fallback when UDP responses are truncated. TCP DNS messages are prefixed with a 2-byte length field, enabling multiple DNS messages per TCP segment.
+
+\paragraph{Tunneling over TCP.}
+TCP DNS tunneling adds transport-layer signals:
+\begin{itemize}
+    \item Multiple DNS messages per TCP stream (segments per message ratio)
+    \item Larger-than-typical TCP payload sizes
+    \item Elevated retransmission ratio (tunnel reliability mechanisms)
+    \item DNS length fields mismatched with TCP segment boundaries
+    \item Long-lived TCP connections (tunnels maintain persistent streams)
+\end{itemize}
+
+\subsection{DNS-over-HTTPS (DoH)}
+
+DoH encapsulates DNS messages inside HTTPS requests (RFC 8484). Queries are sent as HTTP/2 POST or GET requests to \texttt{/dns-query} endpoints on known resolvers. The DNS payload is encrypted within TLS, making content inspection impossible.
+
+\paragraph{Known DoH resolvers.}
+Our detector monitors traffic to well-known public DoH endpoints:
+\begin{lstlisting}
+1.1.1.1 (Cloudflare)    8.8.8.8 (Google)
+9.9.9.9 (Quad9)        208.67.222.222 (OpenDNS)
+94.140.14.14 (AdGuard)  149.112.112.112 (Quad9 v6)
+\end{lstlisting}
+
+\paragraph{Tunneling over DoH.}
+Attackers can abuse DoH because encryption hides DNS content from network monitors. However, the encryption transport itself leaks statistical signals:
+\begin{itemize}
+    \item \textbf{Packet size asymmetry} --- tunnels push large uploads (exfiltration) with asymmetric response sizes
+    \item \textbf{Flow duration and byte rates} --- persistent tunnels have sustained bidirectional throughput unlike bursty legitimate DoH
+    \item \textbf{Packet timing} --- tunnels maintain regular beaconing intervals; legitimate DoH is sparse and irregular
+    \item \textbf{Response time distributions} --- attacker servers may have different latency profiles than public resolvers
+\end{itemize}
+
+Our DoH detector operates \textbf{without TLS decryption}, using only flow-level TCP/TLS statistics observable by any network monitor.
+
+% =============================================================================
 \section{System Architecture}
 
-The final implementation centers on \texttt{pipeline/tui.py}. It has one shared path for live capture and replay mode, so both sources use the same packet parser, flow extractor, model registry, thresholding rule, and UI.
+The detection system is implemented as a modular Python application centered on \texttt{pipeline/tui.py}. All components---live capture, replay, feature extraction, and model inference---share the same pipeline path.
 
-\begin{center}
-\begin{tabular}{p{0.24\linewidth}p{0.68\linewidth}}
+\subsection{Component Overview}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lp{9cm}@{}}
 \toprule
 \textbf{Component} & \textbf{Responsibility} \\
 \midrule
-Packet source & Reads packets from live Scapy capture or from \texttt{samples/demo\_dns\_mix.pcap}. \\
-Flow aggregator & Groups packets into short transport-aware flows, defaulting to 10-second windows. \\
-Feature extractor & Builds UDP53, TCP53, or DoH feature rows compatible with the deployed artifacts. \\
-Model registry & Routes each flow to \texttt{artifacts/classic\_dns/} or \texttt{artifacts/doh/}. \\
-Decision layer & Converts malicious probability into a UI label using a 0.70 threshold. \\
-Textual TUI & Displays alerts, model status, confidence, transport, and detailed flow features. \\
+Packet Source & Reads DNS/DoH packets from live Scapy capture or replays from a PCAP file. \\
+Flow Aggregator & Groups packets into short transport-aware flows using configurable time windows. \\
+Feature Extractor & Builds transport-specific feature vectors for UDP53, TCP53, and DoH flows. \\
+Model Registry & Routes each flow to the correct artifact folder based on transport type. \\
+Decision Layer & Converts model probability into a binary alert using a configurable threshold (default 0.70). \\
+Textual TUI & Displays real-time alerts, model status, flow details, and high-signal features using the Textual framework. \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{System components and their responsibilities}
+\end{table}
 
-\section{Transport-Aware Routing}
+\subsection{Packet Flow}
 
-The monitor does not use one generic model for all traffic. It routes by transport:
+\begin{enumerate}
+    \item \textbf{Packet source} starts in \texttt{live}, \texttt{replay}, or \texttt{auto} mode. Auto mode tries live capture first and falls back to replay if no DNS/DoH packets appear within 5 seconds.
+    \item \textbf{Scapy} parses UDP/53, TCP/53, and TCP/443 packets destined to known DoH resolver IPs.
+    \item \textbf{Flow aggregator} assigns each packet to a flow keyed on \texttt{(transport, src\_ip, dst\_ip, src\_port, dst\_port)}. Flows expire after a configurable window (default 10 seconds).
+    \item \textbf{Feature extractor} consumes the completed flow state and produces a feature row matching the trained model's input schema.
+    \item \textbf{Model registry} routes the flow:
+    \begin{itemize}
+        \item \texttt{UDP53} and \texttt{TCP53} flows $\rightarrow$ \texttt{artifacts/classic\_dns/best\_model.pkl}
+        \item \texttt{DOH} flows $\rightarrow$ \texttt{artifacts/doh/xgboost.pkl}
+    \end{itemize}
+    \item \textbf{Model} returns a probability vector; the malicious class probability is extracted.
+    \item \textbf{Threshold} compares the probability against the configured threshold. Flows above threshold are labeled \texttt{Malicious}; others \texttt{Benign}. Threat severity is then assigned:
+    \begin{itemize}
+        \item $\geq 0.95$: \texttt{CRITICAL}
+        \item $\geq 0.80$: \texttt{HIGH}
+        \item $\geq 0.70$ (threshold): \texttt{MEDIUM}
+        \item $< 0.70$: \texttt{BENIGN}
+    \end{itemize}
+    \item \textbf{TUI} displays the result in an alerts table and a detail panel with high-signal features.
+\end{enumerate}
 
-\begin{center}
-\begin{tabular}{llll}
+\subsection{Transport-Aware Routing}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llll@{}}
 \toprule
-\textbf{Transport} & \textbf{Observed traffic} & \textbf{Artifact folder} & \textbf{Model file} \\
+\textbf{Transport} & \textbf{Traffic Observed} & \textbf{Artifact Directory} & \textbf{Model File} \\
 \midrule
-UDP53 & Classic DNS over UDP/53 & \texttt{artifacts/classic\_dns/} & \texttt{best\_model.pkl} \\
-TCP53 & Classic DNS over TCP/53 & \texttt{artifacts/classic\_dns/} & \texttt{best\_model.pkl} \\
-DOH & TCP/443 flows to known DoH resolvers & \texttt{artifacts/doh/} & \texttt{xgboost.pkl} \\
+UDP53  & Classic DNS over UDP/53          & \texttt{artifacts/classic\_dns/} & \texttt{best\_model.pkl} \\
+TCP53  & Classic DNS over TCP/53          & \texttt{artifacts/classic\_dns/} & \texttt{best\_model.pkl} \\
+DOH    & TCP/443 to known DoH resolvers   & \texttt{artifacts/doh/}          & \texttt{xgboost.pkl} \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Transport-to-model routing table}
+\end{table}
 
-If a required artifact is unavailable, the UI reports \texttt{Unsupported model}. This prevents the demo from displaying a prediction that did not come from a real trained model.
+If a required artifact folder or model file is missing, the TUI displays \texttt{Unsupported model} instead of fabricating a prediction. This ensures that all displayed results come from actual trained models.
 
+\subsection{Demo PCAP Generation}
+
+\texttt{pipeline/create\_demo\_pcap.py} builds a synthetic PCAP (\texttt{samples/demo\_dns\_mix.pcap}) for reliable class demonstrations. The PCAP contains:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lrl@{}}
+\toprule
+\textbf{Transport} & \textbf{Count} & \textbf{Description} \\
+\midrule
+UDP53 & 3  & Benign A-record queries (example.com, python.org, github.com) \\
+UDP53 & 5  & Malicious tunnel-like queries with hex-encoded subdomains, TXT records \\
+TCP53 & 3  & Benign A-record queries (mozilla.org, wikipedia.org, cloudflare.com) \\
+TCP53 & 3  & Malicious beacon/upload/chunk pattern queries \\
+DOH   & 2  & HTTPS flows to known resolvers (1 benign-size, 1 large exfil pattern) \\
+\bottomrule
+\end{tabular}
+\caption{Demo PCAP packet composition}
+\end{table}
+
+% =============================================================================
 \section{Feature Engineering}
 
-The classic DNS detector uses DNS-specific fields and derived ratios. Important feature families include:
+Feature engineering is the core of the detection pipeline. Each transport type requires a different feature set because the observable signals differ fundamentally between unencrypted DNS and encrypted DoH.
 
-\begin{itemize}[leftmargin=*]
-  \item lexical query features: query length, entropy, label entropy, max label length, digit ratio, hex ratio;
-  \item record behavior: query type, response type, TXT/NULL flags, answer count, additional count;
-  \item timing and rate features: query rate and inter-arrival time;
-  \item payload relationships: payload-to-query ratio, response-to-query ratio, entropy per query character;
-  \item TCP DNS fields: segment count, TCP payload size, DNS length field, retransmission pressure.
+\subsection{Classic DNS Features (UDP53 and TCP53)}
+
+For classic DNS, we extract features at two levels: \textbf{lexical} (query name analysis) and \textbf{flow-level} (aggregate behavior across a time window).
+
+\subsubsection{Lexical Features}
+
+Lexical features analyze the structure of DNS query names to detect encoded payloads:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lp{7cm}l@{}}
+\toprule
+\textbf{Feature} & \textbf{Description} & \textbf{Tunnel Signal} \\
+\midrule
+\texttt{query\_length} & Total characters in the FQDN & Longer in tunnels (60--255) \\
+\texttt{query\_entropy} & Shannon entropy of all label characters & Higher in tunnels (hex/base-encoded) \\
+\texttt{label\_entropy} & Mean entropy per dot-separated label & Higher when labels contain encoded data \\
+\texttt{subdomain\_count} & Number of levels beyond the second-level domain & Higher for staging/beacon subdomains \\
+\texttt{max\_label\_length} & Length of the longest label & Tunnels exploit 63-char label limit \\
+\texttt{avg\_label\_length} & Mean label length across all labels & Elevated in tunneling \\
+\texttt{unique\_chars} & Count of distinct characters used & Higher when encoding uses wide alphabet \\
+\texttt{digit\_ratio} & Fraction of numeric characters (0--9) & Elevated in hex and base encoding \\
+\texttt{consonant\_ratio} & Fraction of consonant letters & Lower when encoding uses all alphanumeric \\
+\texttt{hex\_ratio} & Fraction of characters in [0-9a-fA-F] & High in hex-encoded tunnels \\
+\bottomrule
+\end{tabular}
+\caption{Lexical feature definitions}
+\end{table}
+
+\subsubsection{Flow-Level Features}
+
+Flow-level features capture aggregate behavior across the packets within a flow window:
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lp{7cm}l@{}}
+\toprule
+\textbf{Feature} & \textbf{Description} & \textbf{Tunnel Signal} \\
+\midrule
+\texttt{query\_rate} & DNS queries per second & Higher for C2 polling \\
+\texttt{inter\_arrival\_time} & Mean time between queries (ms) & Lower between tunnel queries \\
+\texttt{response\_ratio} & Fraction of packets that are responses & Lower when many queries go unanswered \\
+\texttt{unique\_domains} & Distinct queried domains per window & Lower (focused on tunnel domain) \\
+\texttt{has\_txt\_record} & Binary: TXT record type present & TXT used by dnscat2, iodine \\
+\texttt{has\_null\_record} & Binary: NULL record type present & NULL used by iodine \\
+\texttt{payload\_size} & Total DNS payload bytes per flow & Larger for tunnel data transfer \\
+\bottomrule
+\end{tabular}
+\caption{Flow-level feature definitions (UDP53/TCP53)}
+\end{table}
+
+\subsubsection{Derived Features}
+
+The feature extractor additionally computes ratio and interaction features that amplify the separation between benign and malicious flows:
+
+\begin{itemize}
+    \item \texttt{response\_to\_query\_ratio\_len} --- response length divided by query length
+    \item \texttt{payload\_to\_query\_ratio} --- DNS payload per query character
+    \item \texttt{entropy\_per\_query\_char} --- entropy normalized by query length
+    \item \texttt{high\_entropy\_long\_query} --- product of entropy and query length (amplifies tunnels)
+    \item \texttt{digit\_hex\_mix} --- product of digit\_ratio and hex\_ratio
+    \item \texttt{txt\_or\_null\_record} --- logical OR of TXT and NULL record flags
 \end{itemize}
 
-The DoH detector uses 28 statistical HTTPS flow features, including bytes sent and received, packet length distribution, packet timing distribution, and request/response timing asymmetry. This is appropriate for DoH because the DNS names are encrypted and cannot be inspected directly.
+\subsubsection{TCP53-Specific Features}
 
+TCP DNS flows add transport-layer signals:
+
+\begin{itemize}
+    \item \texttt{segment\_count} --- number of TCP segments in the flow
+    \item \texttt{tcp\_payload\_size} --- total TCP payload bytes
+    \item \texttt{window\_size} --- TCP window size (mean across segments)
+    \item \texttt{retransmission\_ratio} --- fraction of retransmitted segments
+    \item \texttt{dns\_length\_field} --- mean DNS 2-byte length prefix
+    \item \texttt{message\_count} --- number of DNS messages across all segments
+    \item \texttt{avg\_message\_size} / \texttt{max\_message\_size} --- DNS message size statistics
+    \item \texttt{retransmission\_payload\_pressure} --- retransmission\_ratio $\times$ payload\_size
+    \item \texttt{segments\_per\_message} --- segment count per DNS message
+\end{itemize}
+
+\subsection{DoH Features}
+
+Since DoH encrypts DNS content, detection relies entirely on flow-level statistical features derived from TCP/TLS packet sizes, timing, and direction. We extract 28 features organized into three families:
+
+\subsubsection{Packet Length Features (8 features)}
+
+For all packets in the flow: \texttt{Variance}, \texttt{StandardDeviation}, \texttt{Mean}, \texttt{Median}, \texttt{Mode}, \texttt{SkewFromMedian}, \texttt{SkewFromMode}, and \texttt{CoefficientofVariation} of packet lengths.
+
+Tunnel flows exhibit higher variance and larger mean packet sizes due to data transfer, while benign DoH uses small, uniform request/response sizes.
+
+\subsubsection{Packet Timing Features (8 features)}
+
+For inter-packet arrival times (client-side): same 8 statistical moments.
+
+Tunnel flows show regular beaconing (low variance in inter-arrival times) or sustained throughput (low mean packet time), while benign DoH is bursty with long idle periods.
+
+\subsubsection{Response Time Features (8 features)}
+
+For client-request-to-server-response delays: same 8 statistical moments.
+
+Tunnel flows to attacker-controlled servers may have different latency profiles than requests to well-known public resolvers like Cloudflare or Google.
+
+\subsubsection{Flow Aggregate Features (4 features)}
+
+\begin{itemize}
+    \item \texttt{FlowBytesSent} --- total bytes from client to server
+    \item \texttt{FlowSentRate} --- client bytes per second
+    \item \texttt{FlowBytesReceived} --- total bytes from server to client
+    \item \texttt{FlowReceivedRate} --- server bytes per second
+\end{itemize}
+
+High sent/received byte rates with asymmetry (more sent than received) indicate data exfiltration.
+
+% =============================================================================
 \section{Model Training}
 
-Classic DNS training is implemented in \texttt{pipeline/train\_classic\_dns\_detector.py}. It trains three model families:
+\subsection{Classic DNS Detector}
 
-\begin{itemize}[leftmargin=*]
-  \item Logistic Regression as a scaled linear baseline;
-  \item Random Forest as a strong nonlinear tabular baseline;
-  \item XGBoost as a boosted-tree model for structured feature interactions.
+The classic DNS model is trained via \texttt{pipeline/train\_classic\_dns\_detector.py}.
+
+\subsubsection{Dataset}
+
+Training data comes from the \href{https://github.com/ahlashkari/DNS-Tunnel-Datasets}{DNS-Tunnel-Datasets} repository, which contains PCAP captures organized into:
+\begin{itemize}
+    \item \texttt{normal/} --- benign DNS traffic from enterprise networks
+    \item \texttt{tunnel/} --- malicious captures from dnscat2, dns2tcp, iodine, and dnspot
 \end{itemize}
 
-The best classic DNS model is selected by F1 score, with recall and ROC-AUC as tie-breakers, and exported as \texttt{artifacts/classic\_dns/best\_model.pkl}. The DoH detector is trained and exported from \texttt{notebooks/doh\_detector.ipynb}.
+\texttt{pipeline/extract\_classic\_dns\_pcaps.py} processes these PCAPs, extracting per-query DNS feature rows with binary labels (0 = benign, 1 = tunnel). The extraction:
+\begin{itemize}
+    \item Parses UDP and TCP DNS packets via Scapy
+    \item Matches queries to responses via DNS transaction ID and 5-tuple
+    \item Computes lexical features per query name
+    \item Adds temporal context features (inter-arrival time, query rate, retransmission count)
+    \item Exports to \texttt{datasets/classic\_dns\_from\_pcaps.csv}
+\end{itemize}
 
-\section{Current Model Results}
+The dataset is split 80/20 using \texttt{GroupShuffleSplit} by source file to prevent data leakage between train and test sets.
+
+\subsubsection{Models Compared}
+
+Three classifiers are trained with consistent preprocessing:
+
+\begin{itemize}
+    \item \textbf{Logistic Regression} --- linear baseline with \texttt{class\_weight=`balanced'}, StandardScaler preprocessing
+    \item \textbf{Random Forest} --- 350 trees, \texttt{class\_weight=`balanced'}, \texttt{min\_samples\_leaf=2}
+    \item \textbf{XGBoost} --- 350 trees, \texttt{max\_depth=4}, \texttt{learning\_rate=0.05}, subsample/colsample 0.9
+\end{itemize}
+
+Tree-based models use median imputation; linear models use median imputation + standardization.
+
+\subsubsection{Model Selection}
+
+The best model is selected by F1 score, with recall and ROC-AUC as tie-breakers. The winning model is exported as \texttt{best\_model.pkl}.
+
+Additionally, a threshold analysis is performed on the test set: predictions are evaluated at thresholds from 0.05 to 0.95 (step 0.05), measuring accuracy, precision, recall, F1, false positive rate, and false negative rate at each threshold.
+
+\subsection{DoH Detector}
+
+The DoH model is trained via \texttt{notebooks/doh\_detector.ipynb} using the \href{https://www.unb.ca/cic/datasets/dohbrw-2020.html}{CIRA-CIC-DoHBrw-2020} dataset. This dataset contains labeled HTTPS flows to known DoH resolvers, with both benign DoH traffic and malicious DoH tunneling traffic.
+
+The notebook trains three classifiers (Random Forest, XGBoost, Logistic Regression) on the 28 statistical flow features, exports the best model as \texttt{xgboost.pkl}, along with \texttt{scaler.pkl} (StandardScaler fit on training data) and \texttt{label\_encoder.pkl}.
+
+% =============================================================================
+\section{Model Results}
 
 \subsection{Classic DNS}
 
-The current classic DNS artifact selects Random Forest as the deployed model. The training script also exports threshold analysis and deployment metadata.
-
-\begin{center}
-\begin{tabular}{lrrrrrr}
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lrrrrrr@{}}
 \toprule
-\textbf{Model} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{F1} & \textbf{ROC-AUC} & \textbf{Avg. Precision} \\
+\textbf{Model} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{F1} & \textbf{ROC-AUC} & \textbf{Avg. Prec.} \\
 \midrule
-Random Forest & 1.000000 & 1.000000 & 1.000000 & 1.000000 & 1.000000 & 1.000000 \\
-XGBoost & 0.999966 & 0.999976 & 0.999929 & 0.999953 & 1.000000 & 1.000000 \\
+Random Forest      & 1.000000 & 1.000000 & 1.000000 & 1.000000 & 1.000000 & 1.000000 \\
+XGBoost            & 0.999966 & 0.999976 & 0.999929 & 0.999953 & 1.000000 & 1.000000 \\
 Logistic Regression & 0.999907 & 0.999953 & 0.999788 & 0.999870 & 1.000000 & 1.000000 \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{Classic DNS model comparison on test set}
+\end{table}
 
-At the TUI threshold of 0.70, the classic DNS artifact has precision 1.000000, recall 0.999976, F1 0.999988, and zero false positives on the test split used for the exported threshold analysis.
+All three models achieve near-perfect performance. Random Forest is selected as \texttt{best\_model.pkl}. At the operational threshold of 0.70, the model achieves precision 1.000000, recall 0.999976, F1 0.999988, with zero false positives.
 
 \subsection{DNS-over-HTTPS}
 
-The DoH artifact uses XGBoost as the deployed model.
-
-\begin{center}
-\begin{tabular}{lrrrrrr}
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lrrrrrr@{}}
 \toprule
-\textbf{Model} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{F1} & \textbf{ROC-AUC} & \textbf{Avg. Precision} \\
+\textbf{Model} & \textbf{Accuracy} & \textbf{Precision} & \textbf{Recall} & \textbf{F1} & \textbf{ROC-AUC} & \textbf{Avg. Prec.} \\
 \midrule
-Random Forest & 0.9998 & 0.9999 & 0.9997 & 0.9998 & 1.0000 & 1.0000 \\
-XGBoost & 0.9999 & 1.0000 & 0.9999 & 0.9999 & 1.0000 & 1.0000 \\
+XGBoost             & 0.9999 & 1.0000 & 0.9999 & 0.9999 & 1.0000 & 1.0000 \\
+Random Forest       & 0.9998 & 0.9999 & 0.9997 & 0.9998 & 1.0000 & 1.0000 \\
 Logistic Regression & 0.9014 & 0.8732 & 0.9423 & 0.9065 & 0.9583 & 0.9532 \\
 \bottomrule
 \end{tabular}
-\end{center}
+\caption{DoH model comparison}
+\end{table}
 
-\section{TUI Workflow}
+XGBoost is selected as the DoH artifact. The non-linear tree-based models significantly outperform Logistic Regression, confirming that DoH flow statistics have complex, non-linear decision boundaries.
 
-The TUI runs in three modes:
+% =============================================================================
+\section{The Terminal User Interface}
 
-\begin{itemize}[leftmargin=*]
-  \item \texttt{replay}: reads a local demo PCAP and runs the complete detection pipeline;
-  \item \texttt{live}: sniffs live traffic from a selected network interface;
-  \item \texttt{auto}: tries live capture first, then falls back to replay when live capture fails or no DNS/DoH packets are observed.
-\end{itemize}
+The TUI is the primary demonstration and monitoring interface. It is built with the \href{https://textual.textualize.io/}{Textual} framework, which provides a rich terminal UI with mouse support, theming, and reactive data binding.
 
-Replay mode is the recommended classroom workflow because it does not require root permissions and consistently shows benign and malicious examples across UDP53, TCP53, and DoH.
+\subsection{Architecture}
 
-\begin{lstlisting}[style=shell]
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lp{9cm}@{}}
+\toprule
+\textbf{Component} & \textbf{Implementation} \\
+\midrule
+\texttt{DnsTunnelApp} & Main Textual App. Composes the layout, manages bindings (\texttt{q} = quit, \texttt{c} = clear), and polls the packet source on a timer. \\
+\texttt{StatsPanel} & Reactive widget showing total flows, benign/malicious/unsupported counts, alert rate, and source status. \\
+\texttt{DataTable (alerts)} & Scrollable table with columns: Time, Transport, Src, Dst, Label, Confidence, Threat. Cursor selection triggers detail view. \\
+\texttt{FlowDetailPanel} & Shows transport, query name, query type, duration, packet count, model status, confidence, threshold, and top high-signal features for the selected flow. \\
+\texttt{Log} & Scrollable event log with color-coded entries. \\
+\texttt{PacketSource} & Abstract base. Implementations: \texttt{LiveCaptureSource}, \texttt{PcapReplaySource}, \texttt{AutoSource}. \\
+\bottomrule
+\end{tabular}
+\caption{TUI component architecture}
+\end{table}
+
+\subsection{Modes of Operation}
+
+The TUI supports three operational modes:
+
+\paragraph{Replay Mode (recommended for demos).}
+Reads packets from a PCAP file and runs them through the full detection pipeline. No root permissions required. Produces reproducible results for classroom demonstrations.
+
+\begin{lstlisting}
 .venv/bin/python pipeline/tui.py --mode replay --pcap samples/demo_dns_mix.pcap
 \end{lstlisting}
 
-Live mode requires packet-capture permissions:
+\paragraph{Live Mode.}
+Sniffs live traffic from a network interface using Scapy. Requires packet-capture permissions (typically \texttt{sudo}). Captures DNS over UDP/53, TCP/53, and TCP/443 to known DoH resolvers.
 
-\begin{lstlisting}[style=shell]
-sudo .venv/bin/python pipeline/tui.py --mode live --iface <interface>
+\begin{lstlisting}
+sudo .venv/bin/python pipeline/tui.py --mode live --iface wlan0
+sudo .venv/bin/python pipeline/tui.py --mode live --iface eth0
 \end{lstlisting}
 
-The default threshold is 0.70:
-
-\begin{lstlisting}[style=shell]
-.venv/bin/python pipeline/tui.py --mode replay --malicious-threshold 0.70
+To generate test traffic while live mode runs:
+\begin{lstlisting}
+dig example.com           # UDP53 query
+dig +tcp cloudflare.com   # TCP53 query
 \end{lstlisting}
 
-\section{GitHub Setup Workflow}
+\paragraph{Auto Mode (default).}
+Tries live capture first. If live capture fails (e.g., no permissions, no Scapy) or no DNS/DoH packets are observed within 5 seconds, automatically falls back to replay using the default demo PCAP.
 
-The repository includes shell scripts for a fresh clone.
+\begin{lstlisting}
+.venv/bin/python pipeline/tui.py   # auto mode with defaults
+\end{lstlisting}
 
-\begin{lstlisting}[style=shell]
+\subsection{Command-Line Options}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}llp{5.5cm}@{}}
+\toprule
+\textbf{Flag} & \textbf{Default} & \textbf{Description} \\
+\midrule
+\texttt{--mode} & \texttt{auto} & Source mode: \texttt{auto}, \texttt{live}, or \texttt{replay} \\
+\texttt{--iface} & \texttt{None} & Network interface for live capture (e.g., \texttt{wlan0}, \texttt{eth0}) \\
+\texttt{--pcap} & \texttt{samples/demo\_dns\_mix.pcap} & PCAP file path for replay mode \\
+\texttt{--artifacts-root} & \texttt{artifacts} & Directory containing model artifact folders \\
+\texttt{--window-seconds} & \texttt{10.0} & Flow aggregation time window in seconds \\
+\texttt{--flush-seconds} & \texttt{1.0} & Interval for draining completed flows \\
+\texttt{--malicious-threshold} & \texttt{0.70} & Minimum probability to flag as malicious \\
+\texttt{--enable-doh} & \texttt{True} & Enable DoH detection \\
+\texttt{--no-doh} & --- & Disable DoH detection \\
+\bottomrule
+\end{tabular}
+\caption{TUI command-line options}
+\end{table}
+
+Example with a stricter threshold:
+\begin{lstlisting}
+.venv/bin/python pipeline/tui.py --mode replay --malicious-threshold 0.85
+\end{lstlisting}
+
+\subsection{Controls}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Key} & \textbf{Action} \\
+\midrule
+\texttt{q} & Quit the application \\
+\texttt{c} & Clear all alerts and reset counters \\
+Arrow keys & Navigate the alerts table \\
+Click & Select an alert row for detail inspection \\
+\bottomrule
+\end{tabular}
+\caption{TUI keyboard controls}
+\end{table}
+
+Selecting a row opens the flow detail panel showing:
+\begin{itemize}
+    \item Transport type (color-coded: blue for UDP53, lighter blue for TCP53, purple for DoH)
+    \item Source/destination IP and port
+    \item DNS query name and record type
+    \item Flow duration and packet count
+    \item Model status (Ready / Unsupported model)
+    \item Prediction label (Benign or Malicious) with threat severity
+    \item Confidence score and malicious probability
+    \item Decision threshold applied
+    \item High-signal features ranked by importance for that transport type
+\end{itemize}
+
+\subsection{SOC Dark Theme}
+
+The TUI uses a custom dark theme optimized for extended monitoring sessions, inspired by Security Operations Center displays:
+\begin{itemize}
+    \item Deep navy background (\texttt{\#0b1120})
+    \item Color-coded severity: green (benign), orange/yellow (medium/high), red (critical), purple (unsupported)
+    \item Color-coded transport: blue tones for DNS, purple for DoH
+    \item Zebra-striped data table rows for readability
+\end{itemize}
+
+% =============================================================================
+\section{Pipeline Scripts Reference}
+
+\begin{table}[H]
+\centering
+\begin{tabular}{@{}lp{9cm}@{}}
+\toprule
+\textbf{Script} & \textbf{Purpose} \\
+\midrule
+\texttt{tui.py} & \textbf{Main entry point.} Transport-aware DNS tunneling monitor with live capture, replay, and auto fallback. \\
+\texttt{create\_demo\_pcap.py} & Generate \texttt{samples/demo\_dns\_mix.pcap} --- a synthetic PCAP with benign and malicious UDP53, TCP53, and DoH flows for reliable class demonstrations. \\
+\texttt{extract\_classic\_dns\_pcaps.py} & Extract labeled DNS query/response feature rows from raw PCAP files in the \texttt{DNS-Tunnel-Datasets} repository into a training CSV. \\
+\texttt{train\_classic\_dns\_detector.py} & Train Logistic Regression, Random Forest, and XGBoost on the extracted CSV. Export the best model and all supporting artifacts to \texttt{artifacts/classic\_dns/}. \\
+\texttt{enhance\_classic\_dns\_datasets.py} & Add synthetic calibration and edge-case rows to the training CSV to improve model robustness against uncommon tunnel patterns. \\
+\bottomrule
+\end{tabular}
+\caption{Pipeline scripts and their purposes}
+\end{table}
+
+% =============================================================================
+\section{Quick Start Guide}
+
+\subsection{Fresh Clone Setup}
+
+\begin{lstlisting}
 git clone <repo-url>
 cd c1-dns-tunneling
-bash scripts/setup_env.sh
-bash scripts/run_replay_demo.sh
+
+bash scripts/setup_env.sh      # Creates venv, installs deps, generates demo PCAP
+bash scripts/run_replay_demo.sh # Starts the TUI in replay mode
 \end{lstlisting}
 
-Manual setup is also supported:
+\texttt{setup\_env.sh} performs the following steps:
+\begin{enumerate}
+    \item Creates a Python virtual environment (\texttt{.venv/})
+    \item Upgrades pip and installs all dependencies from \texttt{requirements.txt}
+    \item Generates \texttt{samples/demo\_dns\_mix.pcap} if it does not exist
+    \item Verifies that all required model artifacts exist
+\end{enumerate}
 
-\begin{lstlisting}[style=shell]
+\subsection{Manual Setup}
+
+\begin{lstlisting}
 python3 -m venv .venv
 source .venv/bin/activate
-python -m pip install --upgrade pip
-python -m pip install -r requirements.txt
+pip install -r requirements.txt
 python pipeline/create_demo_pcap.py
 python pipeline/tui.py --mode replay --pcap samples/demo_dns_mix.pcap
 \end{lstlisting}
 
-\section{Demo Plan}
+\subsection{Rebuilding Classic DNS Artifacts}
 
-A reliable demonstration is:
+If the pre-extracted CSV exists:
+\begin{lstlisting}
+.venv/bin/python pipeline/train_classic_dns_detector.py \
+  --dataset datasets/classic_dns_from_pcaps.csv \
+  --output-dir artifacts/classic_dns
+\end{lstlisting}
 
-\begin{enumerate}[leftmargin=*]
-  \item Start replay mode.
-  \item Show that the table contains UDP53, TCP53, and DoH transports.
-  \item Select a benign row and point out normal query rate, record type, and low malicious probability.
-  \item Select a malicious row and point out high entropy, long labels, TXT/NULL behavior, burst rate, or DoH flow statistics.
-  \item Explain that the same UI can run in live mode with packet-capture permissions.
+To extract from raw PCAPs (requires \texttt{DNS-Tunnel-Datasets/} clone):
+\begin{lstlisting}
+.venv/bin/python pipeline/extract_classic_dns_pcaps.py \
+  --dataset-root DNS-Tunnel-Datasets \
+  --output datasets/classic_dns_from_pcaps.csv
+\end{lstlisting}
+
+The extracted CSV is large (500k+ rows) and is git-ignored.
+
+\subsection{Rebuilding DoH Artifacts}
+
+\begin{lstlisting}
+jupyter notebook notebooks/doh_detector.ipynb
+\end{lstlisting}
+
+Run all cells. This trains the models on the CIRA-CIC-DoHBrw-2020 dataset and exports \texttt{xgboost.pkl}, \texttt{scaler.pkl}, \texttt{label\_encoder.pkl}, and \texttt{feature\_names.csv} to \texttt{artifacts/doh/}.
+
+% =============================================================================
+\section{Demo Plan for Class Presentation}
+
+\begin{enumerate}
+    \item \textbf{Setup} --- Run \texttt{bash scripts/run\_replay\_demo.sh} to start the TUI.
+    \item \textbf{Explain the layout} --- Point out the stats panel (left), alerts table (top-right), flow detail panel (middle-right), and log (bottom).
+    \item \textbf{Show transport diversity} --- Note that the alerts table contains \texttt{UDP53}, \texttt{TCP53}, and \texttt{DOH} rows, demonstrating the transport-aware routing.
+    \item \textbf{Inspect a benign flow} --- Select a row labeled \texttt{Benign}. Show the normal query name (e.g., \texttt{example.com}), low entropy, normal record type (A), and low malicious probability.
+    \item \textbf{Inspect a malicious UDP flow} --- Select a malicious UDP53 row. Show the long hex-encoded subdomain, high entropy, high hex ratio, TXT record type, and high malicious probability.
+    \item \textbf{Inspect a malicious TCP flow} --- Select a malicious TCP53 row. Highlight the TCP-specific features: segment count, retransmission ratio, payload pressure.
+    \item \textbf{Inspect a DoH flow} --- Select a DoH row. Explain that the query name is encrypted, so detection relies on flow statistics (packet sizes, timing, byte rates).
+    \item \textbf{Adjust the threshold} --- Restart with a stricter threshold (\texttt{--malicious-threshold 0.85}) and show how fewer flows are flagged.
+    \item \textbf{Live mode} --- If time and permissions permit, switch to live mode with \texttt{sudo .venv/bin/python pipeline/tui.py --mode live --iface wlan0} and generate test traffic with \texttt{dig}.
 \end{enumerate}
 
-\section{Limitations And Future Work}
+Key talking points:
+\begin{itemize}
+    \item \textbf{Why DNS tunneling works.} DNS is almost never blocked; attackers exploit this blind spot.
+    \item \textbf{Why transport awareness matters.} UDP53, TCP53, and DoH have different observable signals; a single model cannot handle all three.
+    \item \textbf{Why features matter.} The models don't look at IP addresses or domain blocklists---they learn behavioral patterns from packet structure and timing, making them harder to evade.
+    \item \textbf{Why a threshold is needed.} No model is perfect; the threshold lets operators tune false positive vs.\ false negative trade-offs for their environment.
+\end{itemize}
 
-The current system is designed for a class-demo and prototype SOC monitor. Future improvements include adding more live TCP DNS captures to the classic DNS training data, testing on additional networks, adding persistent alert export, and integrating richer explanations such as feature contribution scores. The current replay PCAP remains useful because it guarantees a repeatable demonstration when live network permissions or traffic are unavailable.
+% =============================================================================
+\section{Model Artifacts Reference}
 
+The project uses two dedicated artifact directories:
+
+\subsection{Classic DNS Artifacts}
+
+\begin{lstlisting}
+artifacts/classic_dns/
+  best_model.pkl                    # Selected model (Random Forest)
+  feature_names.csv                 # Feature names used by the model
+  model_metadata.json               # Training parameters, threshold metrics
+  model_metrics.csv                 # Per-model metrics comparison
+  threshold_analysis.csv            # Detailed threshold sweep results
+  classification_reports.json       # Full sklearn classification reports
+  confusion_matrices.json           # Confusion matrices for all models
+  data_profile.json                 # Dataset statistics
+  logistic_regression.pkl           # Logistic Regression model
+  logistic_regression_coefficients.csv  # LR coefficients for interpretability
+  random_forest.pkl                 # Random Forest model
+  random_forest_feature_importance.csv # RF feature importances
+  xgboost.pkl                       # XGBoost model
+  xgboost_feature_importance.csv    # XGBoost feature importances
+  known_good_sanity_check.csv       # Sanity check predictions
+\end{lstlisting}
+
+\subsection{DoH Artifacts}
+
+\begin{lstlisting}
+artifacts/doh/
+  xgboost.pkl           # Best DoH model (XGBoost)
+  scaler.pkl            # StandardScaler fitted on training data
+  label_encoder.pkl     # Label encoder for binary classes
+  feature_names.csv     # Feature names used by the model
+  model_metadata.json   # Training metadata and performance summary
+  model_metrics.csv     # Per-model metrics comparison
+  best_model.pkl        # Copy of xgboost.pkl for compatibility
+  logistic_regression.pkl
+  random_forest.pkl
+\end{lstlisting}
+
+% =============================================================================
+\section{Repository Structure}
+
+\begin{lstlisting}
+.
+├── pipeline/                      # Detection pipeline scripts
+│   ├── tui.py                     # Main TUI application
+│   ├── create_demo_pcap.py        # Demo PCAP generator
+│   ├── extract_classic_dns_pcaps.py  # PCAP to CSV extractor
+│   ├── train_classic_dns_detector.py # Model trainer
+│   └── enhance_classic_dns_datasets.py # Dataset enhancer
+├── notebooks/                     # Jupyter notebooks
+│   ├── classic_dns_detector.ipynb     # Classic DNS training notebook
+│   └── doh_detector.ipynb             # DoH training notebook
+├── report/                        # Project report
+│   ├── report.tex                 # LaTeX source
+│   ├── report.pdf                 # Compiled PDF
+│   └── figures/                   # Report figures
+├── scripts/                       # Shell scripts
+│   ├── setup_env.sh               # One-command environment setup
+│   └── run_replay_demo.sh         # One-command demo launcher
+├── requirements.txt               # Python dependencies
+└── README.md                      # Usage documentation
+\end{lstlisting}
+
+Note: \texttt{artifacts/}, \texttt{samples/}, \texttt{datasets/}, and \texttt{DNS-Tunnel-Datasets/} are git-ignored and must be generated or downloaded locally.
+
+% =============================================================================
+\section{Dependencies}
+
+\begin{lstlisting}
+joblib          # Model serialization (save/load .pkl files)
+numpy           # Numerical operations
+pandas          # Data manipulation and CSV I/O
+scikit-learn    # Machine learning (RandomForest, LogisticRegression, metrics)
+xgboost         # XGBoost classifier
+scapy           # Packet parsing and live capture
+textual         # Terminal UI framework
+rich            # Terminal formatting (dep of textual)
+kagglehub       # Dataset download (DoH notebook)
+\end{lstlisting}
+
+Install with:
+\begin{lstlisting}
+python -m pip install -r requirements.txt
+\end{lstlisting}
+
+% =============================================================================
+\section{Troubleshooting}
+
+\subsection{Permission Denied in Live Mode}
+Live capture requires raw socket access. Use \texttt{sudo}:
+\begin{lstlisting}
+sudo .venv/bin/python pipeline/tui.py --mode live --iface wlan0
+\end{lstlisting}
+
+\subsection{Unsupported Model in TUI}
+This means a required model artifact is missing. Verify the artifacts exist:
+\begin{lstlisting}
+ls artifacts/classic_dns/best_model.pkl
+ls artifacts/doh/xgboost.pkl
+\end{lstlisting}
+Re-run training or the DoH notebook to regenerate missing artifacts.
+
+\subsection{No Module Named scapy}
+Run the setup script:
+\begin{lstlisting}
+bash scripts/setup_env.sh
+\end{lstlisting}
+
+\subsection{Dataset Not Found in Notebook}
+Start Jupyter from the project root directory:
+\begin{lstlisting}
+cd c1-dns-tunneling
+jupyter notebook
+\end{lstlisting}
+The classic DNS notebook auto-detects the project root for relative paths.
+
+% =============================================================================
+\section{Limitations and Future Work}
+
+\subsection{Current Limitations}
+
+\begin{itemize}
+    \item \textbf{Classic DNS training imbalance.} The training pipeline extracts only UDP-level features from the DNS-Tunnel-Datasets PCAPs; TCP DNS training data is underrepresented because most PCAPs in the dataset are UDP-only.
+    \item \textbf{DoH resolver whitelist.} DoH detection relies on a hardcoded list of known resolver IPs. Custom or enterprise DoH resolvers are not detected.
+    \item \textbf{No TLS interception.} DoH detection is purely statistical; encrypted DNS content is never inspected, which limits the ability to detect sophisticated tunnels that mimic benign DoH traffic patterns.
+    \item \textbf{Offline evaluation only.} The models are trained on labeled datasets; live network performance on unlabeled traffic has not been evaluated.
+    \item \textbf{No persistent alerting.} Alerts exist only within the TUI session; there is no export to SIEM, syslog, or file.
+\end{itemize}
+
+\subsection{Future Directions}
+
+\begin{itemize}
+    \item \textbf{Expand TCP DNS training data.} Capture additional TCP DNS PCAPs with both benign and malicious traffic to improve TCP53 model generalization.
+    \item \textbf{Feature contribution explanations.} Add SHAP or LIME-based feature importance to the TUI detail panel, showing which specific features drove each prediction.
+    \item \textbf{Adaptive thresholding.} Implement per-transport or per-network automatic threshold calibration based on observed benign traffic baselines.
+    \item \textbf{Persistent alert export.} Add JSON/Syslog export for integration with SIEM platforms (e.g., Splunk, ELK).
+    \item \textbf{Encrypted DNS content inspection.} For environments where TLS inspection is permitted, add DoH content-level features as a complementary signal.
+    \item \textbf{Additional tunnel tool coverage.} Test and train on additional DNS tunneling tools (e.g., DNSteal, Heyoka) to improve generalization.
+    \item \textbf{Streaming flow processing.} Replace the fixed window approach with streaming flow features that update incrementally, enabling lower detection latency.
+\end{itemize}
+
+% =============================================================================
 \section{Conclusion}
 
-The final workflow provides a practical end-to-end DNS tunneling detector: trainable model artifacts, a transport-aware live/replay TUI, conservative model routing, thresholded alerts, and a reproducible GitHub setup path. Classic DNS and DoH are handled by different feature pipelines and artifact folders, while the UI presents the results through a single monitoring experience.
+This project delivers a complete, end-to-end DNS tunneling detection system with the following core properties:
+
+\begin{itemize}
+    \item \textbf{Transport-aware.} Three distinct transport channels (UDP53, TCP53, DoH) are handled by separate feature pipelines and models, reflecting their fundamentally different observable signals.
+    \item \textbf{Feature-driven.} Detection relies on statistical and lexical features extracted from packet structure, timing, and query composition---not on IP reputation or domain blocklists.
+    \item \textbf{Demo-ready.} The replay PCAP and TUI provide a reproducible, root-free demonstration path suitable for classroom presentations.
+    \item \textbf{Modular.} Each pipeline stage (capture, aggregation, extraction, inference, display) is independently testable and replaceable.
+    \item \textbf{Conservative.} Missing model artifacts produce \texttt{Unsupported model} rather than fabricated predictions, ensuring all displayed results come from trained models.
+\end{itemize}
+
+The system achieves near-perfect classification performance on both classic DNS (Random Forest: F1 1.000000) and DNS-over-HTTPS (XGBoost: F1 0.9999) on held-out test data. The terminal UI provides an intuitive, SOC-inspired monitoring experience that clearly communicates threat severity, model confidence, and the behavioral signals driving each detection decision.
 
 \end{document}
+
+
