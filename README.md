@@ -2,6 +2,8 @@
 
 Transport-aware DNS tunneling detection for classic DNS (UDP/TCP) and DNS-over-HTTPS (DoH). Includes trained models, a SOC-style terminal UI, and a replay demo PCAP.
 
+<img width="1919" height="1035" alt="Image" src="https://github.com/user-attachments/assets/184a1eb0-6e05-4089-b5a2-9d635e87907f" />
+
 ## Quick Start
 
 ```bash
