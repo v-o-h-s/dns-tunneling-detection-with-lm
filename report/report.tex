@@ -55,6 +55,13 @@ DNS tunneling is a covert communication technique that encodes arbitrary data wi
 
 DNS tunneling exploits the Domain Name System to establish a covert communication channel between a compromised client and an attacker-controlled server. The DNS protocol was designed for name resolution---mapping human-readable domain names to IP addresses---not for arbitrary data transfer. However, because DNS traffic is almost universally permitted through firewalls (port 53 is typically open in both directions), it presents an attractive vector for data exfiltration and command-and-control (C2).
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/dns_tunneling_concept.png}
+\caption{DNS tunneling attack overview: the attacker encodes data in DNS queries that pass through firewalls because port 53 is universally open.}
+\label{fig:concept}
+\end{figure}
+
 \paragraph{How it works.}
 The attacker deploys a malicious authoritative name server for a domain they control (e.g., \texttt{tunnel.attacker.test}). The compromised client encodes payload data into DNS query subdomains and sends them to the attacker's server:
 
@@ -159,6 +166,13 @@ The detection system is implemented as a modular Python application centered on 
 
 \subsection{Component Overview}
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/architecture_flow.png}
+\caption{System architecture: packets flow from capture through aggregation, feature extraction, model routing, prediction, and TUI display.}
+\label{fig:architecture}
+\end{figure}
+
 \begin{table}[H]
 \centering
 \begin{tabular}{@{}lp{9cm}@{}}
@@ -245,6 +259,13 @@ Feature engineering is the core of the detection pipeline. Each transport type r
 \subsection{Classic DNS Features (UDP53 and TCP53)}
 
 For classic DNS, we extract features at two levels: \textbf{lexical} (query name analysis) and \textbf{flow-level} (aggregate behavior across a time window).
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/feature_importance.png}
+\caption{Top 20 features by Random Forest importance. Lexical features (query entropy, hex ratio, digit ratio) dominate, followed by rate/behavior features.}
+\label{fig:features}
+\end{figure}
 
 \subsubsection{Lexical Features}
 
@@ -410,6 +431,20 @@ The notebook trains three classifiers (Random Forest, XGBoost, Logistic Regressi
 
 \subsection{Classic DNS}
 
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/model_comparison.png}
+\caption{Model performance comparison: Classic DNS (left) and DoH (right). Tree-based models dominate; Logistic Regression struggles on non-linear DoH flow features.}
+\label{fig:models}
+\end{figure}
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/threshold_analysis.png}
+\caption{Threshold sensitivity for the Random Forest classic DNS detector. The default 0.70 threshold achieves near-perfect precision with minimal false positives.}
+\label{fig:threshold}
+\end{figure}
+
 \begin{table}[H]
 \centering
 \begin{tabular}{@{}lrrrrrr@{}}
@@ -448,6 +483,13 @@ XGBoost is selected as the DoH artifact. The non-linear tree-based models signif
 \section{The Terminal User Interface}
 
 The TUI is the primary demonstration and monitoring interface. It is built with the \href{https://textual.textualize.io/}{Textual} framework, which provides a rich terminal UI with mouse support, theming, and reactive data binding.
+
+\begin{figure}[H]
+\centering
+\includegraphics[width=\textwidth]{figures/tui_layout.png}
+\caption{TUI layout: left panel (status), alerts table (transport-aware rows with color-coded severity), flow detail panel (selected row inspection), and log.}
+\label{fig:tui}
+\end{figure}
 
 \subsection{Architecture}
 
