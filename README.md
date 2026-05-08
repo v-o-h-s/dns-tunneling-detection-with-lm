@@ -12,6 +12,14 @@ bash scripts/setup_env.sh
 bash scripts/run_replay_demo.sh
 ```
 
+## Train the Classifier
+
+```bash
+.venv/bin/python pipeline/train_classic_dns_detector.py
+```
+
+Auto-downloads the 250 MB dataset from Google Drive (cached to `/tmp`), trains three models (Random Forest, XGBoost, Logistic Regression), and exports the best one to `artifacts/classic_dns/best_model.pkl`.
+
 ## Running the TUI
 
 ### Replay mode (no root)
