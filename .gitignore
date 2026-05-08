@@ -22,22 +22,8 @@ env/
 .DS_Store
 Thumbs.db
 
-# LaTeX build files
-report/*.aux
-report/*.log
-report/*.out
-report/*.toc
-report/*.lof
-report/*.lot
-report/*.bbl
-report/*.blg
-report/*.synctex.gz
-report/*.fls
-report/*.fdb_latexmk
-report/*.xdv
-
-# Keep the final report PDF in Git.
-!report/report.pdf
+# Generated report (compiled locally)
+report/
 
 # Captures (generated runtime)
 captures/
