@@ -36,9 +36,8 @@ datasets/*.parquet
 datasets/*.pkl
 extract.pid
 
-# Generated samples and artifacts (rebuilt locally)
+# Generated samples (rebuilt locally)
 samples/
-artifacts/
 
 # Misc
 *.log
