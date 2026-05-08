@@ -4,10 +4,16 @@
 from __future__ import annotations
 
 import argparse
+import io
 import json
 import multiprocessing
+import re
+import tempfile
 from pathlib import Path
 from typing import Any
+
+import requests
+from tqdm import tqdm
 
 import joblib
 import numpy as np
@@ -48,7 +54,47 @@ DROP_COLUMNS = {
 }
 
 
-def load_dataset(path: Path) -> pd.DataFrame:
+def _download_gdrive(path_str: str) -> Path:
+    """Download a CSV from a Google Drive share link, return local path."""
+    match = re.search(r"/d/([^/]+)", path_str)
+    if not match:
+        raise ValueError(f"Could not extract file ID from {path_str!r}")
+    file_id = match.group(1)
+    out = Path(tempfile.gettempdir()) / f"gdrive_{file_id}.csv"
+
+    if out.exists():
+        size_mb = out.stat().st_size / 1e6
+        print(f"GDrive cache hit: {out}  ({size_mb:.1f} MB)")
+        return out
+
+    print(f"Downloading from Google Drive (id={file_id}) …")
+
+    url = "https://drive.usercontent.google.com/download"
+    params = {"id": file_id, "export": "download", "confirm": "t"}
+
+    with requests.Session() as s:
+        s.get(f"https://drive.usercontent.google.com/download?id={file_id}", stream=True)
+        with s.get(url, params=params, stream=True) as r:
+            r.raise_for_status()
+            total = int(r.headers.get("content-length", 0))
+            with tqdm(total=total, unit="B", unit_scale=True, unit_divisor=1024,
+                       desc="Downloading", miniters=1024 * 1024) as bar:
+                with out.open("wb") as f:
+                    for chunk in r.iter_content(chunk_size=1024 * 1024):
+                        f.write(chunk)
+                        bar.update(len(chunk))
+
+    size_mb = out.stat().st_size / 1e6
+    print(f"Downloaded {size_mb:.1f} MB → {out}")
+    return out
+
+
+def load_dataset(path: Path | str) -> pd.DataFrame:
+    path_str = str(path)
+    if "drive.google.com" in path_str:
+        path = _download_gdrive(path_str)
+
+    path = Path(path)
     if not path.exists():
         raise FileNotFoundError(f"Dataset not found: {path}")
     df = pd.read_csv(path)
@@ -347,7 +393,7 @@ def train(dataset: Path, output_dir: Path) -> pd.DataFrame:
 
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--dataset", type=Path, default=Path("datasets/classic_dns_from_pcaps.csv"), help="Path to extracted PCAP features CSV")
+    parser.add_argument("--dataset", type=str, default="https://drive.google.com/file/d/12GQFIYGd-781rpb6rqwL_72eEb5snqP-/view?usp=sharing", help="Path or Google Drive URL to the dataset CSV")
     parser.add_argument("--output-dir", type=Path, default=Path("artifacts/classic_dns"))
     return parser.parse_args()
 
