@@ -7,7 +7,7 @@ Transport-aware DNS tunneling detection for classic DNS (UDP/TCP) and DNS-over-H
 ## Quick Start
 
 ```bash
-git clone <repo-url> && cd c1-dns-tunneling
+git clone https://github.com/v-o-h-s/dns-tunneling-detection-with-lm && cd c1-dns-tunneling
 bash scripts/setup_env.sh
 bash scripts/run_replay_demo.sh
 ```
