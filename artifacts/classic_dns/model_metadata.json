@@ -1,0 +1,33 @@
+{
+  "best_model": "random_forest",
+  "dataset": "/home/gyro/Documents/Projects/cns_projects/c1-dns-tunneling/datasets/classic_dns_from_pcaps.csv",
+  "decision_threshold": 0.7,
+  "feature_count": 58,
+  "label_mapping": {
+    "0": "benign",
+    "1": "dns_tunnel"
+  },
+  "random_state": 42,
+  "target": "label",
+  "test_rows": 117926,
+  "threshold_metrics": {
+    "accuracy": 0.999991520105829,
+    "f1": 0.9999882185228384,
+    "false_negative_rate": 2.3562676720075402e-05,
+    "false_positive_rate": 0.0,
+    "fn": 1,
+    "fp": 0,
+    "precision": 1.0,
+    "recall": 0.9999764373232799,
+    "threshold": 0.7,
+    "tn": 75486,
+    "tp": 42439
+  },
+  "train_rows": 459633,
+  "transport_model": "combined_udp_tcp_classic_dns",
+  "tui_transport_routing": {
+    "DOH": "artifacts/doh",
+    "TCP53": "artifacts/classic_dns",
+    "UDP53": "artifacts/classic_dns"
+  }
+}

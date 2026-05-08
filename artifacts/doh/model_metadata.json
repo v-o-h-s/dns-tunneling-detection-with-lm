@@ -1,0 +1,16 @@
+{
+  "artifact_folder": "artifacts/doh",
+  "best_model": "XGBoost",
+  "dataset": "BCCC-CIRA-CIC-DoHBrw-2020",
+  "decision_threshold": 0.7,
+  "detector": "doh",
+  "feature_count": 28,
+  "random_state": 42,
+  "target": "Label",
+  "transport_model": "dns_over_https",
+  "tui_transport_routing": {
+    "DOH": "artifacts/doh",
+    "TCP53": "artifacts/classic_dns",
+    "UDP53": "artifacts/classic_dns"
+  }
+}

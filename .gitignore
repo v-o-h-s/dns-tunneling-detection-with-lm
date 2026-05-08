@@ -12,9 +12,6 @@ build/
 venv/
 env/
 
-# Jupyter
-.ipynb_checkpoints/
-
 # IDE
 .vscode/
 .idea/
@@ -48,6 +45,10 @@ captures/
 # Large generated datasets / external clones
 DNS-Tunnel-Datasets/
 datasets/
+datasets/*.csv
+datasets/*.parquet
+datasets/*.pkl
+extract.pid
 
 # Keep deployable model artifacts and small metadata in Git.
 !artifacts/
@@ -55,4 +56,3 @@ datasets/
 # Misc
 *.log
 *.tmp
-*.pid
