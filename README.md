@@ -14,11 +14,21 @@ bash scripts/run_replay_demo.sh
 
 ## Train the Classifier
 
+### Classic DNS (UDP53 / TCP53)
+
 ```bash
 .venv/bin/python pipeline/train_classic_dns_detector.py
 ```
 
 Auto-downloads the 250 MB dataset from Google Drive (cached to `/tmp`), trains three models (Random Forest, XGBoost, Logistic Regression), and exports the best one to `artifacts/classic_dns/best_model.pkl`.
+
+### DNS-over-HTTPS (DoH)
+
+```bash
+.venv/bin/jupyter nbconvert --to notebook --execute notebooks/doh_detector.ipynb --output artifacts/doh/
+```
+
+Downloads the BCCC-CIRA-CIC-DoHBrw-2020 dataset (500K rows) from Kaggle, trains RF / XGBoost / LR on 28 statistical flow features, and exports `best_model.pkl` + `scaler.pkl` to `artifacts/doh/`.
 
 ## Running the TUI
 
